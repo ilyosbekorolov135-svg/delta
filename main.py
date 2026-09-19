@@ -1,6 +1,13 @@
 """
-Delta MMT Telegram Bot — Ariza qoldirish olib tashlangan
+Delta MMT Telegram Bot — Sodiqlik dasturi to'liq yangilangan
 Python 3.13+ uchun
+
+YANGILANISHLAR v2.0:
+- Sodiqlik: FAQAT to'langan FOIZ summasidan ball (1000 so'm foiz = 1 ball)
+- Kalkulyator: har bir variantda foiz summasi va shundan hisoblangan ball
+- Darajalar rasmdagidek: Bronze → Silver → Gold → Platinum → VIP
+- Sodiqlik amal qiladigan va qilmaydigan bo'limlar ajratildi
+- Kredit olish shartlari (hujjatdan) qo'shildi
 """
 
 import asyncio
@@ -43,11 +50,11 @@ PHONE_1_RAW = "+998555205000"
 PHONE_2_DISPLAY = "+998 (55) 516-50-00"
 PHONE_2_RAW = "+998555165000"
 
-import os
-LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+LOGO_PATH = "logo.png"
 
-DATA_DIR = "/tmp/data"
-USERS_FILE = "/tmp/data/users.json"
+DATA_DIR = "data"
+USERS_FILE = "data/users.json"
+LOYALTY_FILE = "data/loyalty.json"
 
 
 # ============================================================
@@ -84,7 +91,7 @@ def register_user(user_id: int, first_name: str, last_name: str = "", username: 
     users = load_json(USERS_FILE, {})
     str_id = str(user_id)
     is_new = str_id not in users
-    
+
     if is_new:
         users[str_id] = {
             "id": user_id,
@@ -94,7 +101,9 @@ def register_user(user_id: int, first_name: str, last_name: str = "", username: 
             "registered_at": datetime.now().isoformat(),
             "last_seen": datetime.now().isoformat(),
             "visits": 1,
-            "blocked": False
+            "blocked": False,
+            "referred_by": None,
+            "ref_code": f"DELTA{user_id}",
         }
     else:
         users[str_id]["last_seen"] = datetime.now().isoformat()
@@ -102,7 +111,7 @@ def register_user(user_id: int, first_name: str, last_name: str = "", username: 
         users[str_id]["last_name"] = last_name
         users[str_id]["username"] = username
         users[str_id]["visits"] = users[str_id].get("visits", 0) + 1
-    
+
     save_json(USERS_FILE, users)
     return is_new
 
@@ -119,6 +128,211 @@ def get_today_users_count():
     users = load_json(USERS_FILE, {})
     today = datetime.now().date().isoformat()
     return sum(1 for u in users.values() if u.get("registered_at", "").startswith(today))
+
+
+# ============================================================
+# SODIQLIK DASTURI — FAQAT FOIZ SUMMASIDAN BALL
+# ============================================================
+def get_loyalty_data(user_id: int) -> dict:
+    """Foydalanuvchining sodiqlik ma'lumotlarini olish"""
+    loyalty = load_json(LOYALTY_FILE, {})
+    str_id = str(user_id)
+    if str_id not in loyalty:
+        loyalty[str_id] = {
+            "user_id": user_id,
+            "points": 0,
+            "total_interest_paid": 0,   # FAQAT to'langan foiz summasi
+            "total_paid": 0,            # Umumiy to'lovlar (ma'lumot uchun)
+            "invited_friends": [],
+            "joined_at": datetime.now().isoformat(),
+        }
+        save_json(LOYALTY_FILE, loyalty)
+    return loyalty[str_id]
+
+
+def add_points(user_id: int, points: int, reason: str = ""):
+    """Ball qo'shish (referal va bonus uchun)"""
+    loyalty = load_json(LOYALTY_FILE, {})
+    str_id = str(user_id)
+    if str_id not in loyalty:
+        loyalty[str_id] = {
+            "user_id": user_id,
+            "points": 0,
+            "total_interest_paid": 0,
+            "total_paid": 0,
+            "invited_friends": [],
+            "joined_at": datetime.now().isoformat(),
+        }
+    loyalty[str_id]["points"] = loyalty[str_id].get("points", 0) + points
+    save_json(LOYALTY_FILE, loyalty)
+    logger.info(f"Ball qo'shildi: {user_id} +{points} ({reason})")
+
+
+def add_interest_payment(user_id: int, interest_amount: float):
+    """
+    FOIZ to'lovidan ball hisoblash.
+    QOIDA: har 1000 so'm to'langan FOIZ summasi = 1 ball
+    Misol: 2 500 000 so'm foiz to'langan = 2500 ball
+    """
+    points = int(interest_amount // 1000)
+    
+    loyalty = load_json(LOYALTY_FILE, {})
+    str_id = str(user_id)
+    if str_id not in loyalty:
+        loyalty[str_id] = {
+            "user_id": user_id,
+            "points": 0,
+            "total_interest_paid": 0,
+            "total_paid": 0,
+            "invited_friends": [],
+            "joined_at": datetime.now().isoformat(),
+        }
+    
+    loyalty[str_id]["points"] = loyalty[str_id].get("points", 0) + points
+    loyalty[str_id]["total_interest_paid"] = loyalty[str_id].get("total_interest_paid", 0) + interest_amount
+    loyalty[str_id]["total_paid"] = loyalty[str_id].get("total_paid", 0) + interest_amount
+    save_json(LOYALTY_FILE, loyalty)
+    
+    logger.info(f"Foiz to'lovi: {user_id} - {interest_amount} so'm → {points} ball")
+    return points
+
+
+def get_loyalty_level(points: int) -> dict:
+    """Ball miqdoriga qarab daraja aniqlash (rasmdagidek)"""
+    if points >= 20000:
+        return {
+            "name": "VIP",
+            "icon": "👑",
+            "discount": "5%",
+            "min_points": 20000,
+            "bonus": "navbatsiz + shaxsiy maslahatchi",
+            "color": "#8B0000"
+        }
+    elif points >= 15000:
+        return {
+            "name": "PLATINUM",
+            "icon": "💎",
+            "discount": "3%",
+            "min_points": 15000,
+            "bonus": "navbatsiz",
+            "color": "#E5E4E2"
+        }
+    elif points >= 10000:
+        return {
+            "name": "GOLD",
+            "icon": "🥇",
+            "discount": "2%",
+            "min_points": 10000,
+            "bonus": "",
+            "color": "#FFD700"
+        }
+    elif points >= 5000:
+        return {
+            "name": "SILVER",
+            "icon": "🥈",
+            "discount": "1%",
+            "min_points": 5000,
+            "bonus": "",
+            "color": "#C0C0C0"
+        }
+    else:
+        return {
+            "name": "BRONZE",
+            "icon": "🥉",
+            "discount": "0%",
+            "min_points": 0,
+            "bonus": "",
+            "color": "#CD7F32"
+        }
+
+
+def get_loyalty_text(user_id: int) -> str:
+    """Foydalanuvchi sodiqlik ma'lumotlari matni"""
+    data = get_loyalty_data(user_id)
+    points = data.get("points", 0)
+    level = get_loyalty_level(points)
+
+    levels = [
+        (5000, "SILVER", "🥈", "1%"),
+        (10000, "GOLD", "🥇", "2%"),
+        (15000, "PLATINUM", "💎", "3%"),
+        (20000, "VIP", "👑", "5%"),
+    ]
+    
+    next_info = ""
+    for threshold, name, icon, disc in levels:
+        if points < threshold:
+            need = threshold - points
+            next_info = (
+                f"\n\n🎯 <b>Keyingi daraja:</b> {icon} <b>{name}</b>\n"
+                f"   Kerak: <b>{need:,}</b> ball\n"
+                f"   Chegirma: <b>{disc}</b>"
+            )
+            break
+    else:
+        next_info = "\n\n🏆 Siz eng yuqori darajaga erishdingiz!"
+
+    text = (
+        f"⭐ <b>MENING BALLARIM</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏅 <b>Darajangiz:</b> {level['icon']} <b>{level['name']}</b>\n"
+        f"💰 <b>Chegirmangiz:</b> <b>{level['discount']}</b>\n"
+        f"⭐ <b>Ballaringiz:</b> <b>{points:,}</b> ball\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>To'lov statistikasi:</b>\n"
+        f"  • To'langan foiz: <b>{data.get('total_interest_paid', 0):,.0f}</b> so'm\n"
+        f"  • Jami to'lov: <b>{data.get('total_paid', 0):,.0f}</b> so'm\n"
+        f"  • Taklif qilgan do'stlar: <b>{len(data.get('invited_friends', []))}</b> ta"
+        f"{next_info}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <b>Ballar qanday hisoblanadi?</b>\n\n"
+        f"💰 <b>Foiz to'lovlaridan:</b>\n"
+        f"   Har <b>1000 so'm foiz</b> to'lovi = <b>1 ball</b>\n"
+        f"   <i>Misol: 2 500 000 so'm foiz = 2500 ball</i>\n\n"
+        f"👥 <b>Do'st taklif qilishdan:</b>\n"
+        f"   Har bir do'st = <b>1000 ball</b>"
+    )
+    return text
+
+
+def get_loyalty_main_text() -> str:
+    """Sodiqlik dasturi haqida umumiy ma'lumot (rasmdagidek)"""
+    return (
+        f"🎁 <b>SODIQLIK DASTURI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<i>«{SLOGAN}»</i>\n\n"
+        f"Delta MMT sodiqlik dasturi bilan to'plangan "
+        f"ballaringizdan foydalaning!\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏅 <b>DARAJALAR</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🥉 <b>BRONZE</b> — DELTA MMT mijoziga aylaning\n"
+        f"🥈 <b>SILVER</b> — 5 000 ball + yillik 1% chegirma\n"
+        f"🥇 <b>GOLD</b> — 10 000 ball + yillik 2% chegirma\n"
+        f"💎 <b>PLATINUM</b> — 15 000 ball + yillik 3% chegirma + navbatsiz\n"
+        f"👑 <b>VIP</b> — 20 000 ball + yillik 5% chegirma + navbatsiz + shaxsiy maslahatchi\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>4 QADAM</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>1-QADAM:</b> DELTA MMTda kredit rasmiylashtiring\n"
+        f"<b>2-QADAM:</b> Ballarga ega bo'ling va ularni yig'ing\n"
+        f"<b>3-QADAM:</b> Do'stlaringiz, qo'shnilaringiz va "
+        f"yaqin tanishlaringizni taklif qiling\n"
+        f"<b>4-QADAM:</b> Yillik stavkalar uchun chegirmalarga ega bo'ling\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <b>BALLAR QANDAY HISOBLANADI?</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💰 <b>1. Foiz to'lovlaridan:</b>\n"
+        f"   Har <b>1000 so'm foiz to'lovi</b> = <b>1 ball</b>\n"
+        f"   <i>Misol: 100 000 000 so'm kredit olib, 2 500 000 so'm "
+        f"foiz to'lagan bo'lsangiz = 2500 ball</i>\n\n"
+        f"👥 <b>2. Do'st taklif qilishdan:</b>\n"
+        f"   Har bir taklif qilingan do'st = <b>1000 ball</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>Muhim eslatma:</b> Ballar kreditning asosiy "
+        f"summasidan emas, faqat <b>to'langan foiz summasidan</b> "
+        f"hisoblanadi!"
+    )
 
 
 # ============================================================
@@ -169,6 +383,7 @@ LOAN_PRODUCTS = {
         "collateral": "Zargarlik buyumlari (100%)",
         "rate_numeric": 0.659,
         "min_amount": 2_000_000, "max_amount": 100_000_000, "max_months": 37,
+        "loyalty": True,
     },
     "madad": {
         "name": "MADAD", "category": "Mikroqarzlar", "icon": "🆘",
@@ -178,6 +393,7 @@ LOAN_PRODUCTS = {
         "collateral": "Kafillik yoki garovsiz",
         "rate_numeric": 0.619,
         "min_amount": 2_000_000, "max_amount": 25_000_000, "max_months": 18,
+        "loyalty": True,
     },
     "fayz": {
         "name": "FAYZ", "category": "Mikroqarzlar", "icon": "✨",
@@ -187,6 +403,7 @@ LOAN_PRODUCTS = {
         "collateral": "Avtomobil",
         "rate_numeric": 0.539,
         "min_amount": 15_000_000, "max_amount": 100_000_000, "max_months": 36,
+        "loyalty": True,
     },
     "ishonch": {
         "name": "ISHONCH", "category": "Mikroqarzlar", "icon": "💎",
@@ -196,6 +413,7 @@ LOAN_PRODUCTS = {
         "collateral": "Garovsiz, sug'urta polisi",
         "rate_numeric": 0.599,
         "min_amount": 2_000_000, "max_amount": 50_000_000, "max_months": 25,
+        "loyalty": True,
     },
     "baraka": {
         "name": "BARAKA", "category": "Mikroqarzlar", "icon": "🌟",
@@ -205,6 +423,7 @@ LOAN_PRODUCTS = {
         "collateral": "3 shaxs kafilligi",
         "rate_numeric": 0.559,
         "min_amount": 5_000_000, "max_amount": 50_000_000, "max_months": 25,
+        "loyalty": True,
     },
     "sahovat": {
         "name": "SAHOVAT", "category": "Mikroqarzlar", "icon": "🎁",
@@ -214,6 +433,7 @@ LOAN_PRODUCTS = {
         "collateral": "3 shaxs kafilligi",
         "rate_numeric": 0.479,
         "min_amount": 2_000_000, "max_amount": 2_000_000, "max_months": 19,
+        "loyalty": True,
     },
     "nasiya_1": {
         "name": "NASIYA-1", "category": "Mikroqarzlar", "icon": "🛍️",
@@ -223,6 +443,7 @@ LOAN_PRODUCTS = {
         "collateral": "Avtomobil, zargarlik, ko'chmas mulk",
         "rate_numeric": 0.50,
         "min_amount": 1_000_000, "max_amount": 10_000_000, "max_months": 37,
+        "loyalty": False,
     },
     "komak": {
         "name": "KO'MAK", "category": "Mikroqarzlar", "icon": "🤲",
@@ -232,6 +453,7 @@ LOAN_PRODUCTS = {
         "collateral": "Garovsiz, sug'urta",
         "rate_numeric": 0.669,
         "min_amount": 1_000_000, "max_amount": 15_000_000, "max_months": 12,
+        "loyalty": True,
     },
     "umid": {
         "name": "UMID", "category": "Mikroqarzlar", "icon": "🌈",
@@ -241,6 +463,7 @@ LOAN_PRODUCTS = {
         "collateral": "Zargarlik (90%)",
         "rate_numeric": 0.629,
         "min_amount": 10_000_000, "max_amount": 100_000_000, "max_months": 6,
+        "loyalty": True,
     },
     "kredit_liniyasi": {
         "name": "KREDIT LINIYASI", "category": "Mikrokreditlar", "icon": "💳",
@@ -250,6 +473,7 @@ LOAN_PRODUCTS = {
         "collateral": "Avtomobil, zargarlik, ko'chmas mulk",
         "rate_numeric": 0.549,
         "min_amount": 10_000_000, "max_amount": 300_000_000, "max_months": 49,
+        "loyalty": True,
     },
     "rivoj": {
         "name": "RIVOJ", "category": "Mikrokreditlar", "icon": "📈",
@@ -259,6 +483,7 @@ LOAN_PRODUCTS = {
         "collateral": "Avtomobil, zargarlik, ko'chmas mulk",
         "rate_numeric": 0.48,
         "min_amount": 10_000_000, "max_amount": 300_000_000, "max_months": 37,
+        "loyalty": True,
     },
     "tezkor": {
         "name": "TEZKOR", "category": "Mikrokreditlar", "icon": "⚡",
@@ -268,24 +493,33 @@ LOAN_PRODUCTS = {
         "collateral": "Garovsiz, sug'urta",
         "rate_numeric": 0.599,
         "min_amount": 3_000_000, "max_amount": 50_000_000, "max_months": 25,
+        "loyalty": True,
     },
     "tadbirkor": {
         "name": "TADBIRKOR", "category": "Mikrokreditlar", "icon": "💼",
         "amount_range": "10 mln – 300 mln so'm",
-        "amount_tiers": [{"range": "10-300 mln", "months": "37 oy", "rate": "44,9% / 52,9%"}],
+        "amount_tiers": [
+            {"range": "10-100 mln", "months": "37 oy", "rate": "44,9%"},
+            {"range": "100-300 mln", "months": "37 oy", "rate": "52,9%"},
+        ],
         "grace_period": "6 oygacha",
         "collateral": "Avtomobil, zargarlik, kafillik",
         "rate_numeric": 0.529,
         "min_amount": 10_000_000, "max_amount": 300_000_000, "max_months": 37,
+        "loyalty": True,
     },
     "samara": {
         "name": "SAMARA", "category": "Mikrokreditlar", "icon": "🏆",
         "amount_range": "10 mln – 300 mln so'm",
-        "amount_tiers": [{"range": "10-300 mln", "months": "49 oy", "rate": "44,9% / 52,9%"}],
+        "amount_tiers": [
+            {"range": "10-100 mln", "months": "49 oy", "rate": "44,9%"},
+            {"range": "100-300 mln", "months": "49 oy", "rate": "52,9%"},
+        ],
         "grace_period": "6 oygacha",
         "collateral": "Avtomobil, zargarlik, kafillik",
         "rate_numeric": 0.529,
         "min_amount": 10_000_000, "max_amount": 300_000_000, "max_months": 49,
+        "loyalty": True,
     },
     "nasiya_2": {
         "name": "NASIYA-2", "category": "Mikrokreditlar", "icon": "🛒",
@@ -295,6 +529,7 @@ LOAN_PRODUCTS = {
         "collateral": "Avtomobil, zargarlik, ko'chmas mulk",
         "rate_numeric": 0.50,
         "min_amount": 10_000_000, "max_amount": 300_000_000, "max_months": 37,
+        "loyalty": False,
     },
     "maqsad": {
         "name": "MAQSAD", "category": "Mikrokreditlar", "icon": "🎯",
@@ -307,6 +542,7 @@ LOAN_PRODUCTS = {
         "collateral": "Garovsiz / ko'chmas mulk",
         "rate_numeric": 0.48,
         "min_amount": 10_000_000, "max_amount": 300_000_000, "max_months": 60,
+        "loyalty": True,
     },
     "avtokredit": {
         "name": "AVTOKREDIT", "category": "Iste'mol", "icon": "🚗",
@@ -316,6 +552,7 @@ LOAN_PRODUCTS = {
         "collateral": "Avtomobil",
         "rate_numeric": 0.48,
         "min_amount": 5_000_000, "max_amount": 300_000_000, "max_months": 60,
+        "loyalty": True,
     },
     "davr": {
         "name": "DAVR", "category": "Iste'mol", "icon": "🕐",
@@ -325,6 +562,7 @@ LOAN_PRODUCTS = {
         "collateral": "Xarid qilinayotgan tovar",
         "rate_numeric": 0.52,
         "min_amount": 1_000_000, "max_amount": 25_000_000, "max_months": 25,
+        "loyalty": True,
     },
 }
 
@@ -341,6 +579,12 @@ BRANCHES = [
      "address": "TTZ-2, 52/18", "lat": 41.3155, "lng": 69.3210, "is_main": False},
     {"id": "sirgali", "name": "Sirg'ali", "region": "Toshkent shahri",
      "address": "Sergeli-2, Yangi Sergeli, 52", "lat": 41.2135, "lng": 69.2245, "is_main": False},
+    {"id": "chilonzor", "name": "Chilonzor", "region": "Toshkent shahri",
+     "address": "Bunyodkor shoh ko'chasi, 12", "lat": 41.2760, "lng": 69.2040, "is_main": False},
+    {"id": "yakkasaroy", "name": "Yakkasaroy", "region": "Toshkent shahri",
+     "address": "Shota Rustaveli, 45", "lat": 41.2890, "lng": 69.2560, "is_main": False},
+    {"id": "mirabad", "name": "Mirabad", "region": "Toshkent shahri",
+     "address": "Mirabad tumani, Afrosiyob, 12", "lat": 41.2830, "lng": 69.2730, "is_main": False},
     {"id": "olmaliq", "name": "Olmaliq", "region": "Toshkent viloyati",
      "address": "Amir Temur, 29", "lat": 40.8447, "lng": 69.5983, "is_main": False},
     {"id": "boka", "name": "Bo'ka", "region": "Toshkent viloyati",
@@ -353,12 +597,16 @@ BRANCHES = [
      "address": "Mustaqillik, 45", "lat": 40.5286, "lng": 70.9425, "is_main": False},
     {"id": "fargona", "name": "Farg'ona", "region": "Farg'ona viloyati",
      "address": "Ma'rifat, 22v", "lat": 40.3864, "lng": 71.7864, "is_main": False},
+    {"id": "margilon", "name": "Marg'ilon", "region": "Farg'ona viloyati",
+     "address": "Mustaqillik, 78", "lat": 40.4711, "lng": 71.7243, "is_main": False},
     {"id": "andijon", "name": "Andijon", "region": "Andijon viloyati",
      "address": "Milliy Tiklanish, 21", "lat": 40.7829, "lng": 72.3442, "is_main": False},
     {"id": "buxoro", "name": "Buxoro", "region": "Buxoro viloyati",
      "address": "Navoiy, ko'chasi", "lat": 39.7675, "lng": 64.4231, "is_main": False},
     {"id": "samarqand", "name": "Samarqand", "region": "Samarqand viloyati",
      "address": "Registon, 8", "lat": 39.6270, "lng": 66.9750, "is_main": False},
+    {"id": "kattaqorgon", "name": "Kattaqo'rg'on", "region": "Samarqand viloyati",
+     "address": "Amir Temur, 15", "lat": 39.8986, "lng": 66.2561, "is_main": False},
     {"id": "navoiy", "name": "Navoiy", "region": "Navoiy viloyati",
      "address": "O'zbekiston, 12", "lat": 40.0844, "lng": 65.3792, "is_main": False},
     {"id": "urganch", "name": "Urganch", "region": "Xorazm viloyati",
@@ -371,6 +619,9 @@ BRANCHES = [
      "address": "Sayxun, 69", "lat": 40.4897, "lng": 68.7842, "is_main": False},
     {"id": "bekobod", "name": "Bekobod", "region": "Toshkent viloyati",
      "address": "Buyuk Ipak yo'li, 2/48", "lat": 40.2206, "lng": 69.2681, "is_main": False},
+    {"id": "qarshi", "name": "Qarshi", "region": "Qashqadaryo viloyati",
+     "address": "Mustaqillik, 35", "lat": 38.8606, "lng": 65.7887, "is_main": False},
+    
 ]
 
 
@@ -394,15 +645,25 @@ def calc_monthly(principal: float, months: int, annual_rate: float) -> float:
     return principal * (mr * (1 + mr) ** months) / ((1 + mr) ** months - 1)
 
 
+def calc_interest_total(principal: float, months: int, annual_rate: float) -> float:
+    """
+    Kredit bo'yicha jami to'lanadigan FOIZ summasi.
+    Annuitet to'lovlarida: jami to'lov - asosiy qarz
+    """
+    monthly = calc_monthly(principal, months, annual_rate)
+    total_payment = monthly * months
+    return total_payment - principal
+
+
 # ============================================================
 # KLAVIATURALAR
 # ============================================================
 def main_menu_kb(is_adm: bool = False) -> ReplyKeyboardMarkup:
-    """Asosiy menyu — Ariza qoldirish olib tashlandi"""
+    """Asosiy menyu — Kalkulyator olib tashlandi, Sodiqlik qo'shildi"""
     rows = [
-        [KeyboardButton(text="💼 Kreditlar"), KeyboardButton(text="🧮 Kalkulyator")],
+        [KeyboardButton(text="💼 Kreditlar"), KeyboardButton(text="🎁 Sodiqlik dasturi")],
         [KeyboardButton(text="📍 Filiallar"), KeyboardButton(text="📞 Aloqa")],
-        [KeyboardButton(text="ℹ️ Kompaniya")],
+        [KeyboardButton(text="ℹ️ Kompaniya"), KeyboardButton(text="📋 Kredit shartlari")],
     ]
     if is_adm:
         rows.append([KeyboardButton(text="🎛️ Admin panel")])
@@ -430,7 +691,18 @@ def admin_main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📊 Statistika", callback_data="ADMIN_STATS"),
             InlineKeyboardButton(text="👥 Foydalanuvchilar", callback_data="ADMIN_USERS")
         ],
+        [InlineKeyboardButton(text="🎁 Sodiqlik statistikasi", callback_data="ADMIN_LOYALTY")],
         [InlineKeyboardButton(text="📢 Broadcast", callback_data="ADMIN_BROADCAST")],
+        [InlineKeyboardButton(text="🔙 Asosiy menyu", callback_data="NAV_MAIN")]
+    ])
+
+
+def loyalty_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ Mening ballarim", callback_data="LOYALTY_MY")],
+        [InlineKeyboardButton(text="🏅 Darajalar", callback_data="LOYALTY_LEVELS")],
+        [InlineKeyboardButton(text="👥 Do'stni taklif qilish", callback_data="LOYALTY_REF")],
+        [InlineKeyboardButton(text="💼 Kreditlar", callback_data="NAV_CATS")],
         [InlineKeyboardButton(text="🔙 Asosiy menyu", callback_data="NAV_MAIN")]
     ])
 
@@ -484,6 +756,74 @@ def get_call_text() -> str:
     )
 
 
+def get_credit_terms_text() -> str:
+    """Kredit olish shartlari (hujjatdan)"""
+    return (
+        f"📋 <b>KREDIT OLISH SHARTLARI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>👤 QARZ OLUVCHIGA QO'YILADIGAN TALABLAR:</b>\n\n"
+        f"✅ Yoshi <b>25 yoshdan katta</b> bo'lgan O'zbekiston "
+        f"Respublikasi fuqarolari\n"
+        f"✅ O'zbekistonda yashash va faoliyat yuritish huquqiga ega "
+        f"norezidentlar\n"
+        f"✅ Tadbirkorlik sub'ektlari\n"
+        f"⚠️ 25 yoshdan kichik bo'lsa — ota-onasining yozma roziligi kerak\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>❌ KREDIT BERISH TAQIQLANADI:</b>\n\n"
+        f"• Yomon kredit tarixi bo'lsa\n"
+        f"• To'lov qobiliyati yetarli bo'lmasa\n"
+        f"• Daromad manbai aniqlanmasa\n"
+        f"• Muddati o'tgan majburiyatlar bo'lsa\n"
+        f"• 300 mln+ kredit uchun biznes-reja bo'lmasa\n"
+        f"• Likvid garov ta'minoti bo'lmasa\n"
+        f"• Qarz yuki yuqori bo'lsa\n"
+        f"• Kredit uchinchi shaxslar uchun olinayotgan bo'lsa\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>🏠 GAROV TURLARI:</b>\n\n"
+        f"♦️ Zargarlik buyumlari\n"
+        f"♦️ Transport vositalari\n"
+        f"♦️ Uchinchi shaxslarning kafilligi\n"
+        f"♦️ Yangi mebel va maishiy texnika\n"
+        f"♦️ Sug'urta polisi\n"
+        f"♦️ Mahalla qo'mitasining kafilligi\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>💰 KREDIT BERISH USULLARI:</b>\n\n"
+        f"• Kassa orqali naqd pul\n"
+        f"• Bank hisob raqamiga o'tkazma\n"
+        f"• Plastik kartaga o'tkazma\n"
+        f"• Yetkazib beruvchi hisobiga (iste'mol krediti)\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>📅 FOIZ HISOBLASH:</b>\n\n"
+        f"Foizlar kredit berilgan kundan boshlab hisoblanadi. "
+        f"Yillik qarz summasining yarmidan ko'p foiz, komissiya "
+        f"yoki jarima undirilishi taqiqlanadi.\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>⚠️ KECHIKTIRILGAN TO'LOV UCHUN JARIMA:</b>\n\n"
+        f"• 1-5 kun: kunlik <b>0,5%</b>\n"
+        f"• 6-30 kun: kunlik <b>1,0%</b>\n"
+        f"• 31-90 kun: kunlik <b>2,0%</b>\n"
+        f"• 90+ kun: jarima hisoblash to'xtatiladi\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>👤 QARZ OLUVCHINING HUQUQLARI:</b>\n\n"
+        f"✅ Kredit shartnomasini imzolashdan oldin o'qib chiqish\n"
+        f"✅ Shartnomani o'zi bilan olib ketish\n"
+        f"✅ To'lov shaklini o'zi tanlash\n"
+        f"✅ Yashash joyidan qat'i nazar murojaat qilish\n"
+        f"✅ Bepul ma'lumot olish (oyda 1 marta)\n"
+        f"✅ Kreditni muddatidan oldin qaytarish\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>📄 KERAKLI HUJJATLAR:</b>\n\n"
+        f"• Pasport va nusxasi\n"
+        f"• Daromad to'g'risida ma'lumot\n"
+        f"• Birgalikda qarz oluvchi pasporti (bo'lsa)\n"
+        f"• Yuridik shaxslar uchun balans hisoboti\n"
+        f"• Biznes-reja (tadbirkorlar uchun)\n"
+        f"• Garov hujjatlari\n"
+        f"• Kafil pasporti\n\n"
+        f"💡 <i>Batafsil ma'lumot uchun Call-markazga murojaat qiling</i>"
+    )
+
+
 # ============================================================
 # START
 # ============================================================
@@ -498,14 +838,37 @@ async def cmd_start(message: Message, state: FSMContext):
         user.username or ""
     )
     
+    # Referal tekshirish
+    if message.text and "ref" in message.text:
+        try:
+            ref_id = int(message.text.split("ref")[-1].split()[0])
+            if ref_id != user.id:
+                add_points(ref_id, 1000, "referral")
+                
+                try:
+                    await bot.send_message(
+                        ref_id,
+                        f"🎉 <b>Do'stingiz qo'shildi!</b>\n\n"
+                        f"👤 {user.first_name}\n"
+                        f"⭐ +1000 ball sizning hisobingizga qo'shildi!",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+                
+                logger.info(f"Referal: {ref_id} +1000 ball ({user.id})")
+        except:
+            pass
+    
     welcome = (
         f"👋 Assalomu alaykum, <b>{user.first_name}</b>!\n\n"
         f"<b>{COMPANY_NAME}</b> rasmiy botiga xush kelibsiz!\n\n"
         f"<i>«{SLOGAN}»</i>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💼 18 ta kredit mahsuloti\n"
-        f"🧮 Kredit kalkulyatori\n"
+        f"🎁 Sodiqlik dasturi (ballar tizimi)\n"
         f"📍 {len(BRANCHES)} ta filial\n"
+        f"📋 Kredit olish shartlari\n"
         f"📞 Aloqa ma'lumotlari\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👇 Kerakli bo'limni tanlang:"
@@ -567,19 +930,15 @@ async def menu_credits(message: Message, state: FSMContext):
     )
 
 
-@router.message(F.text == "🧮 Kalkulyator")
-async def menu_calc(message: Message, state: FSMContext):
+@router.message(F.text == "🎁 Sodiqlik dasturi")
+async def menu_loyalty(message: Message, state: FSMContext):
     await state.clear()
-    buttons = []
-    for cid, cat in CATEGORIES.items():
-        buttons.append([InlineKeyboardButton(
-            text=f"{cat['icon']} {cat['name']}",
-            callback_data=f"CALCCAT_{cid}"
-        )])
-    buttons.append([InlineKeyboardButton(text="🔙 Asosiy menyu", callback_data="NAV_MAIN")])
+    user_id = message.from_user.id
+    get_loyalty_data(user_id)
+    
     await message.answer(
-        "🧮 <b>Kalkulyator</b>\n\nKategoriyani tanlang:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        get_loyalty_main_text(),
+        reply_markup=loyalty_menu_kb(),
         parse_mode="HTML"
     )
 
@@ -621,6 +980,17 @@ async def menu_about(message: Message, state: FSMContext):
     await message.answer(get_about_text(), reply_markup=kb, parse_mode="HTML")
 
 
+@router.message(F.text == "📋 Kredit shartlari")
+async def menu_credit_terms(message: Message, state: FSMContext):
+    await state.clear()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💼 Kreditlar", callback_data="NAV_CATS")],
+        [InlineKeyboardButton(text="📞 Aloqa", callback_data="NAV_CALL")],
+        [InlineKeyboardButton(text="🔙 Asosiy menyu", callback_data="NAV_MAIN")]
+    ])
+    await message.answer(get_credit_terms_text(), reply_markup=kb, parse_mode="HTML")
+
+
 @router.message(F.text == "🎛️ Admin panel")
 async def menu_admin(message: Message, state: FSMContext):
     await state.clear()
@@ -648,8 +1018,9 @@ async def cb_cat(call: CallbackQuery):
     buttons = []
     for pid in cat["products"]:
         p = LOAN_PRODUCTS[pid]
+        loyalty_mark = "🎁" if p.get("loyalty") else ""
         buttons.append([InlineKeyboardButton(
-            text=f"{p['icon']} {p['name']}",
+            text=f"{p['icon']} {p['name']} {loyalty_mark}",
             callback_data=f"PROD_{pid}"
         )])
     buttons.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data="NAV_CATS")])
@@ -680,49 +1051,160 @@ async def cb_prod(call: CallbackQuery):
     text += f"🎁 <b>Imtiyozli:</b> {p['grace_period']}\n"
     text += f"🏠 <b>Garov:</b> {p['collateral']}\n"
     
+    # Sodiqlik dasturi haqida
+    if p.get("loyalty"):
+        text += (
+            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎁 <b>SODIQLIK DASTURI AMAL QILADI</b>\n"
+            f"   Har <b>1000 so'm to'langan foiz</b> = <b>1 ball</b>\n"
+            f"   <i>Asosiy qarzdan emas, faqat foiz summasidan</i>\n"
+            f"   Misol: 100 mln kredit, 36 oy, foiz ~50 mln\n"
+            f"   → ~50 000 ball to'playsiz!\n"
+        )
+    else:
+        text += (
+            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>SODIQLIK DASTURI AMAL QILMAYDI</b>\n"
+            f"   Bu mahsulot bo'yicha ballar hisoblanmaydi\n"
+            f"   <i>(Shartnoma asosida)</i>\n"
+        )
+    
     cat_id = None
     for cid, c in CATEGORIES.items():
         if pid in c["products"]:
             cat_id = cid
             break
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧮 Kalkulyator", callback_data=f"CALC_{pid}")],
-        [InlineKeyboardButton(text="🔙 Orqaga", callback_data=f"CAT_{cat_id}")]
-    ])
+    kb_buttons = [[InlineKeyboardButton(text="🧮 Kalkulyator", callback_data=f"CALC_{pid}")]]
+    if p.get("loyalty"):
+        kb_buttons.append([InlineKeyboardButton(text="🎁 Sodiqlik dasturi", callback_data="NAV_LOYALTY")])
+    kb_buttons.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data=f"CAT_{cat_id}")])
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
     
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await call.answer()
 
 
 # ============================================================
-# KALKULYATOR
+# SODIQLIK CALLBACK
 # ============================================================
-@router.callback_query(F.data.startswith("CALCCAT_"))
-async def cb_calccat(call: CallbackQuery):
-    cid = call.data[8:]
-    if cid not in CATEGORIES:
-        await call.answer("❌", show_alert=True)
-        return
-    
-    cat = CATEGORIES[cid]
-    buttons = []
-    for pid in cat["products"]:
-        p = LOAN_PRODUCTS[pid]
-        buttons.append([InlineKeyboardButton(
-            text=f"{p['icon']} {p['name']}",
-            callback_data=f"CALC_{pid}"
-        )])
-    buttons.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data="NAV_CALC")])
-    
-    await call.message.edit_text(
-        f"{cat['icon']} <b>{cat['name']}</b>\n\nMahsulotni tanlang:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML"
-    )
+@router.callback_query(F.data == "NAV_LOYALTY")
+async def cb_nav_loyalty(call: CallbackQuery):
+    user_id = call.from_user.id
+    get_loyalty_data(user_id)
+    try:
+        await call.message.edit_text(
+            get_loyalty_main_text(),
+            reply_markup=loyalty_menu_kb(),
+            parse_mode="HTML"
+        )
+    except:
+        await call.message.answer(
+            get_loyalty_main_text(),
+            reply_markup=loyalty_menu_kb(),
+            parse_mode="HTML"
+        )
     await call.answer()
 
 
+@router.callback_query(F.data == "LOYALTY_MY")
+async def cb_loyalty_my(call: CallbackQuery):
+    user_id = call.from_user.id
+    text = get_loyalty_text(user_id)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Yangilash", callback_data="LOYALTY_MY")],
+        [InlineKeyboardButton(text="🔙 Sodiqlik", callback_data="NAV_LOYALTY")]
+    ])
+    
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except:
+        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "LOYALTY_REF")
+async def cb_loyalty_ref(call: CallbackQuery):
+    user_id = call.from_user.id
+    data = get_loyalty_data(user_id)
+    bot_username = "Delta_MMT_bot"
+    
+    text = (
+        f"👥 <b>DO'STNI TAKLIF QILISH</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎁 Har bir taklif qilingan do'st uchun\n"
+        f"siz <b>1000 ball</b> olasiz!\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📤 <b>Sizning havolangiz:</b>\n\n"
+        f"<code>https://t.me/{bot_username}?start=ref{user_id}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Statistika:</b>\n"
+        f"  • Taklif qilganlar: <b>{len(data.get('invited_friends', []))}</b> ta\n"
+        f"  • Ballaringiz: <b>{data.get('points', 0):,}</b> ball\n\n"
+        f"💡 <i>Havolani nusxalab do'stlaringizga yuboring!</i>"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📋 Havolani nusxalash",
+            copy_text={"text": f"https://t.me/{bot_username}?start=ref{user_id}"}
+        )],
+        [InlineKeyboardButton(text="🔙 Sodiqlik", callback_data="NAV_LOYALTY")]
+    ])
+    
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except:
+        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "LOYALTY_LEVELS")
+async def cb_loyalty_levels(call: CallbackQuery):
+    text = (
+        f"🏅 <b>DARAJALAR VA CHEGIRMALAR</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🥉 <b>BRONZE</b> — DELTA MMT mijoziga aylaning\n"
+        f"   Chegirma: 0%\n\n"
+        f"🥈 <b>SILVER</b>\n"
+        f"   Ball: 5 000+ | Chegirma: 1% (yillik)\n\n"
+        f"🥇 <b>GOLD</b>\n"
+        f"   Ball: 10 000+ | Chegirma: 2% (yillik)\n\n"
+        f"💎 <b>PLATINUM</b>\n"
+        f"   Ball: 15 000+ | Chegirma: 3% (yillik)\n"
+        f"   + navbatsiz xizmat\n\n"
+        f"👑 <b>VIP</b>\n"
+        f"   Ball: 20 000+ | Chegirma: 5% (yillik)\n"
+        f"   + navbatsiz xizmat\n"
+        f"   + shaxsiy maslahatchi\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <b>QANDAY BALL TO'PLASH MUMKIN?</b>\n\n"
+        f"💰 <b>Foiz to'lovlaridan:</b>\n"
+        f"   Har 1000 so'm foiz = 1 ball\n"
+        f"   <i>Misol: 2 500 000 so'm foiz = 2500 ball</i>\n\n"
+        f"👥 <b>Do'st taklif qilishdan:</b>\n"
+        f"   Har bir do'st = 1000 ball\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>Muhim:</b> Ballar faqat <b>to'langan foiz "
+        f"summasidan</b> hisoblanadi, asosiy qarzdan emas!"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Sodiqlik", callback_data="NAV_LOYALTY")]
+    ])
+    
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except:
+        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+# ============================================================
+# KALKULYATOR (YANGILANGAN — FOIZ + BALL)
+# ============================================================
 @router.callback_query(F.data.startswith("CALC_"))
 async def cb_calc(call: CallbackQuery, state: FSMContext):
     pid = call.data[5:]
@@ -772,13 +1254,35 @@ async def process_calc(message: Message, state: FSMContext):
     months_opts = [m for m in [3, 6, 12, 18, 24, 36, 49, 60] if m <= p["max_months"]]
     
     text = f"💰 <b>{format_money(amount)} so'm</b>\n\n📅 <b>Variantlar:</b>\n\n"
+    
     for m in months_opts:
         monthly = calc_monthly(amount, m, rate)
-        total = monthly * m
+        total_payment = monthly * m
+        interest = total_payment - amount  # FAQAT FOIZ
+        points = int(interest // 1000) if p.get("loyalty") else 0
+        
         text += f"  • <b>{m} oy</b> — {format_money(monthly)} so'm/oy\n"
-        text += f"    Jami: {format_money(total)}\n"
+        text += f"    Jami: {format_money(total_payment)} so'm\n"
+        text += f"    📈 <b>Foiz:</b> {format_money(interest)} so'm\n"
+        if p.get("loyalty"):
+            text += f"    ⭐ <b>Ball:</b> {points:,} ball\n\n"
+        else:
+            text += f"    ⚠️ Sodiqlik: <i>hisoblanmaydi</i>\n\n"
     
-    text += f"\n💡 {PHONE_1_DISPLAY}"
+    if p.get("loyalty"):
+        text += (
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎁 <b>Sodiqlik dasturi:</b>\n"
+            f"Ballar <b>faqat to'langan foiz summasidan</b> hisoblanadi:\n"
+            f"Har <b>1000 so'm foiz = 1 ball</b>\n\n"
+            f"💡 {PHONE_1_DISPLAY}"
+        )
+    else:
+        text += (
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Bu mahsulotda sodiqlik dasturi amal qilmaydi</b>\n\n"
+            f"💡 {PHONE_1_DISPLAY}"
+        )
     
     await state.clear()
     await message.answer(text, reply_markup=call_center_kb(), parse_mode="HTML")
@@ -881,23 +1385,6 @@ async def cb_nav_cats(call: CallbackQuery):
     await call.answer()
 
 
-@router.callback_query(F.data == "NAV_CALC")
-async def cb_nav_calc(call: CallbackQuery):
-    buttons = []
-    for cid, cat in CATEGORIES.items():
-        buttons.append([InlineKeyboardButton(
-            text=f"{cat['icon']} {cat['name']}",
-            callback_data=f"CALCCAT_{cid}"
-        )])
-    buttons.append([InlineKeyboardButton(text="🔙 Asosiy", callback_data="NAV_MAIN")])
-    await call.message.edit_text(
-        "🧮 <b>Kalkulyator</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML"
-    )
-    await call.answer()
-
-
 @router.callback_query(F.data == "NAV_BRANCHES")
 async def cb_nav_branches(call: CallbackQuery):
     regions = {}
@@ -957,12 +1444,18 @@ async def cb_admin_stats(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         return
     
+    loyalty = load_json(LOYALTY_FILE, {})
+    total_points = sum(d.get("points", 0) for d in loyalty.values())
+    
     text = (
         f"📊 <b>Statistika</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 <b>Foydalanuvchilar:</b>\n"
         f"  • Jami: <b>{get_users_count()}</b>\n"
         f"  • Bugun: <b>{get_today_users_count()}</b>\n\n"
+        f"🎁 <b>Sodiqlik dasturi:</b>\n"
+        f"  • Ishtirokchilar: <b>{len(loyalty)}</b>\n"
+        f"  • Jami ballar: <b>{total_points:,}</b>\n\n"
         f"📞 <b>Call-markaz:</b>\n"
         f"  • {PHONE_1_DISPLAY}\n"
         f"  • {PHONE_2_DISPLAY}"
@@ -998,6 +1491,40 @@ async def cb_admin_users(call: CallbackQuery):
         text += f"<i>... yana {len(sorted_users) - 15} ta</i>"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Admin panel", callback_data="ADMIN_PANEL")]
+    ])
+    
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "ADMIN_LOYALTY")
+async def cb_admin_loyalty(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return
+    
+    loyalty = load_json(LOYALTY_FILE, {})
+    total_users = len(loyalty)
+    total_points = sum(d.get("points", 0) for d in loyalty.values())
+    total_interest = sum(d.get("total_interest_paid", 0) for d in loyalty.values())
+    
+    text = (
+        f"🎁 <b>Sodiqlik statistikasi</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 <b>Ishtirokchilar:</b> {total_users} ta\n"
+        f"⭐ <b>Jami ballar:</b> {total_points:,}\n"
+        f"💰 <b>Jami foiz to'lovlari:</b> {total_interest:,.0f} so'm\n\n"
+        f"🏆 <b>TOP-10 mijozlar:</b>\n"
+    )
+    
+    sorted_loyalty = sorted(loyalty.values(), key=lambda x: x.get("points", 0), reverse=True)
+    
+    for i, d in enumerate(sorted_loyalty[:10], 1):
+        level = get_loyalty_level(d.get("points", 0))
+        text += f"{i}. 🆔 <code>{d['user_id']}</code> — {d.get('points', 0):,} ball {level['icon']}\n"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Yangilash", callback_data="ADMIN_LOYALTY")],
         [InlineKeyboardButton(text="🔙 Admin panel", callback_data="ADMIN_PANEL")]
     ])
     
